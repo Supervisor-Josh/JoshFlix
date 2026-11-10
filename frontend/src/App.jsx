@@ -1,40 +1,128 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { open } from '@tauri-apps/plugin-dialog';
 import { 
   Film, Music, Image as ImageIcon, FileText, Trash2, 
-  Play, Info, HardDrive, Search, ShieldCheck, ArrowUpCircle 
+  Play, HardDrive, Search, ShieldCheck, FolderOpen, Loader2, Settings,
+  RotateCcw, Trash
 } from 'lucide-react';
+import { 
+  getStoredMedia, saveScannedMedia, getDB, 
+  setMediaDeletedStatus, permanentlyDeleteMedia 
+} from './services/db';
+import VideoPlayer from './components/VideoPlayer';
+import SettingsModal from './components/SettingsModal';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('home');
   const [searchQuery, setSearchQuery] = useState('');
   const [diskFreeSpace, setDiskFreeSpace] = useState('Loading...');
+  const [mediaItems, setMediaItems] = useState([]);
+  const [watchHistory, setWatchHistory] = useState({});
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanPath, setScanPath] = useState('');
+  const [currentPlayingMedia, setCurrentPlayingMedia] = useState(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-  // Fetch live disk space from Rust backend on load
-  useEffect(() => {
-    async function fetchDiskSpace() {
-      try {
-        const disks = await invoke('get_disk_space');
-        if (disks && disks.length > 0) {
-          // Calculate free space in GB from the first available drive
-          const freeBytes = disks[0][2];
-          const freeGB = (freeBytes / (1024 * 1024 * 1024)).toFixed(1);
-          setDiskFreeSpace(`${freeGB} GB Free`);
-        }
-      } catch (err) {
-        console.error("Failed to load disk space from backend:", err);
-        setDiskFreeSpace('142 GB Free'); // Fallback mock value
+  // Load cached media, watch history, and disk space on startup
+  const loadAppData = async () => {
+    try {
+      const cached = await getStoredMedia();
+      if (cached && cached.length > 0) {
+        setMediaItems(cached);
       }
+
+      // Fetch watch history map from SQLite
+      const db = await getDB();
+      const historyRows = await db.select('SELECT path, progress, duration FROM watch_history');
+      const historyMap = {};
+      historyRows.forEach(row => {
+        historyMap[row.path] = row;
+      });
+      setWatchHistory(historyMap);
+
+      // Fetch live disk space from Rust backend
+      const disks = await invoke('get_disk_space');
+      if (disks && disks.length > 0) {
+        const freeBytes = disks[0][2];
+        const freeGB = (freeBytes / (1024 * 1024 * 1024)).toFixed(1);
+        setDiskFreeSpace(`${freeGB} GB Free`);
+      }
+    } catch (err) {
+      console.error("Initialization error:", err);
+      setDiskFreeSpace('142 GB Free');
     }
-    fetchDiskSpace();
+  };
+
+  useEffect(() => {
+    loadAppData();
   }, []);
 
-  const mockMedia = [
-    { id: 1, title: 'Inception', type: 'video', category: 'Movies', poster: 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=500&auto=format&fit=crop', desc: 'A thief who steals corporate secrets through dream-sharing technology.' },
-    { id: 2, title: 'Cyberpunk Beats', type: 'audio', category: 'Music', poster: 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=500&auto=format&fit=crop', desc: 'Synthwave track - 320kbps MP3' },
-    { id: 3, title: 'Sunset Wallpapers', type: 'image', category: 'Photos', poster: 'https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?w=500&auto=format&fit=crop', desc: '4K Ultra HD Nature Photography' },
-    { id: 4, title: 'Project Proposal.pdf', type: 'document', category: 'Documents', poster: 'https://images.unsplash.com/photo-1568667256549-094345857637?w=500&auto=format&fit=crop', desc: 'Technical Architecture & Specifications' },
-  ];
+  // Open native dialog to pick a folder, scan via Rust, and save to SQLite
+  async function handleSelectFolder() {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: 'Select Local Media Directory',
+      });
+
+      if (selected) {
+        setIsScanning(true);
+        setScanPath(selected);
+        
+        const results = await invoke('scan_directory', { dirPath: selected });
+        await saveScannedMedia(results);
+        
+        await loadAppData();
+        setIsScanning(false);
+      }
+    } catch (err) {
+      console.error("Failed to scan directory:", err);
+      setIsScanning(false);
+    }
+  }
+
+  // Soft-delete item (move to trash tab)
+  const handleSoftDelete = async (e, id) => {
+    e.stopPropagation();
+    await setMediaDeletedStatus(id, true);
+    await loadAppData();
+  };
+
+  // Restore item back to main library
+  const handleRestore = async (e, id) => {
+    e.stopPropagation();
+    await setMediaDeletedStatus(id, false);
+    await loadAppData();
+  };
+
+  // Permanently delete item record
+  const handlePermanentDelete = async (e, id) => {
+    e.stopPropagation();
+    await permanentlyDeleteMedia(id);
+    await loadAppData();
+  };
+
+  // Filter media items based on active tab, trash status, and search query
+  const filteredMedia = mediaItems.filter(item => {
+    const matchesSearch = item.title.toLowerCase().includes(searchQuery.toLowerCase());
+    const isTrash = item.is_deleted === 1;
+
+    if (activeTab === 'trash') {
+      return isTrash && matchesSearch;
+    }
+
+    // Hide deleted items from active library tabs
+    if (isTrash) return false;
+
+    if (activeTab === 'home') return matchesSearch;
+    if (activeTab === 'movies') return matchesSearch && item.media_type === 'video';
+    if (activeTab === 'music') return matchesSearch && item.media_type === 'audio';
+    if (activeTab === 'photos') return matchesSearch && item.media_type === 'image';
+    if (activeTab === 'docs') return matchesSearch && item.media_type === 'document';
+    return matchesSearch;
+  });
 
   return (
     <div className="flex h-screen bg-[#141414] text-white overflow-hidden select-none">
@@ -80,20 +168,39 @@ export default function App() {
           </nav>
         </div>
 
-        <div className="p-3 bg-neutral-900/60 rounded-xl border border-neutral-800 space-y-3">
-          <div className="flex items-center justify-between text-xs text-neutral-400">
-            <span className="flex items-center gap-1 text-emerald-400 font-medium">
-              <ShieldCheck className="w-4 h-4" /> Data Protected
-            </span>
-            <span className="text-[10px] bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300">Offline</span>
-          </div>
-          <div>
-            <div className="flex justify-between text-xs text-neutral-300 mb-1">
-              <span className="flex items-center gap-1"><HardDrive className="w-3.5 h-3.5 text-neutral-400" /> Disk</span>
-              <span className="font-mono">{diskFreeSpace}</span>
+        <div className="space-y-3">
+          <button 
+            onClick={handleSelectFolder}
+            disabled={isScanning}
+            className="w-full flex items-center justify-center gap-2 bg-neutral-800 hover:bg-neutral-700 text-white font-medium text-xs py-2.5 px-3 rounded-xl border border-neutral-700 transition shadow"
+          >
+            {isScanning ? <Loader2 className="w-4 h-4 animate-spin text-red-500" /> : <FolderOpen className="w-4 h-4 text-red-500" />}
+            {isScanning ? 'Scanning Directory...' : 'Scan Local Folder'}
+          </button>
+
+          <button 
+            onClick={() => setIsSettingsOpen(true)}
+            className="w-full flex items-center justify-center gap-2 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 hover:text-white font-medium text-xs py-2.5 px-3 rounded-xl border border-neutral-800 transition shadow"
+          >
+            <Settings className="w-4 h-4 text-neutral-400" />
+            Settings & Preferences
+          </button>
+
+          <div className="p-3 bg-neutral-900/60 rounded-xl border border-neutral-800 space-y-3">
+            <div className="flex items-center justify-between text-xs text-neutral-400">
+              <span className="flex items-center gap-1 text-emerald-400 font-medium">
+                <ShieldCheck className="w-4 h-4" /> SQLite Cached
+              </span>
+              <span className="text-[10px] bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300">Offline</span>
             </div>
-            <div className="w-full bg-neutral-800 h-1.5 rounded-full overflow-hidden">
-              <div className="bg-gradient-to-r from-red-600 to-red-500 h-full w-[55%]" />
+            <div>
+              <div className="flex justify-between text-xs text-neutral-300 mb-1">
+                <span className="flex items-center gap-1"><HardDrive className="w-3.5 h-3.5 text-neutral-400" /> Disk</span>
+                <span className="font-mono">{diskFreeSpace}</span>
+              </div>
+              <div className="w-full bg-neutral-800 h-1.5 rounded-full overflow-hidden">
+                <div className="bg-gradient-to-r from-red-600 to-red-500 h-full w-[55%]" />
+              </div>
             </div>
           </div>
         </div>
@@ -106,7 +213,7 @@ export default function App() {
             <Search className="absolute left-3 top-2.5 w-4 h-4 text-neutral-400" />
             <input
               type="text"
-              placeholder="Search local movies, tracks, documents..."
+              placeholder="Search cached local library..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full pl-9 pr-4 py-2 bg-neutral-900 border border-neutral-700/60 rounded-full text-sm text-white placeholder-neutral-500 focus:outline-none focus:border-red-600 transition"
@@ -114,69 +221,158 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-4">
-            <button className="flex items-center gap-1.5 text-xs bg-red-950/40 hover:bg-red-900/60 text-red-400 border border-red-800/50 px-3 py-1.5 rounded-full transition">
-              <ArrowUpCircle className="w-4 h-4" /> Check Updates
-            </button>
+            {scanPath && (
+              <span className="text-xs text-neutral-400 truncate max-w-xs">
+                Folder: <span className="text-neutral-200 font-mono">{scanPath}</span>
+              </span>
+            )}
             <div className="w-9 h-9 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center font-bold text-red-500">
               J
             </div>
           </div>
         </header>
 
-        <div className="relative h-[380px] w-full bg-neutral-900 overflow-hidden flex items-end p-8">
-          <img 
-            src="https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=1600&auto=format&fit=crop" 
-            alt="Hero background" 
-            className="absolute inset-0 w-full h-full object-cover opacity-40 filter brightness-90"
-          />
-          <div className="absolute inset-0 bg-gradient-to-t from-[#141414] via-[#141414]/40 to-transparent" />
-          
-          <div className="relative z-10 max-w-2xl space-y-3">
-            <span className="text-xs font-bold uppercase tracking-widest text-red-500 bg-red-950/80 px-2.5 py-1 rounded-md border border-red-800/60">
-              Featured Local Media
-            </span>
-            <h1 className="text-4xl font-extrabold tracking-tight">Inception (2010)</h1>
-            <p className="text-sm text-neutral-300 line-clamp-2">
-              A thief who steals corporate secrets through dream-sharing technology is given the inverse task of planting an idea into the mind of a C.E.O.
-            </p>
-            <div className="flex items-center gap-3 pt-2">
-              <button className="flex items-center gap-2 bg-white text-black hover:bg-neutral-200 px-6 py-2.5 rounded-lg font-bold text-sm transition">
-                <Play className="w-4 h-4 fill-current" /> Play File
-              </button>
-              <button className="flex items-center gap-2 bg-neutral-800/80 hover:bg-neutral-700 text-white px-5 py-2.5 rounded-lg font-medium text-sm border border-neutral-700 transition backdrop-blur">
-                <Info className="w-4 h-4" /> Details
-              </button>
-            </div>
+        {/* MEDIA GRID DISPLAY */}
+        <div className="p-8 space-y-6">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-bold tracking-wide">
+              {activeTab === 'home' && 'Cached Local Library'}
+              {activeTab === 'movies' && 'Movies & Video Library'}
+              {activeTab === 'music' && 'Music & Audio Tracks'}
+              {activeTab === 'photos' && 'Photos & Artwork'}
+              {activeTab === 'docs' && 'Local Documents'}
+              {activeTab === 'trash' && 'Recycle Bin'}
+            </h2>
+            <span className="text-xs text-neutral-400">{filteredMedia.length} items loaded</span>
           </div>
-        </div>
 
-        <div className="p-8 space-y-8">
-          <div>
-            <h2 className="text-xl font-bold mb-4 tracking-wide">Recently Added</h2>
-            <div className="grid grid-cols-4 gap-6">
-              {mockMedia.map((item) => (
-                <div 
-                  key={item.id}
-                  className="group relative bg-neutral-900 rounded-xl overflow-hidden border border-neutral-800 hover:border-red-600 transition duration-300 cursor-pointer shadow-lg hover:scale-[1.02]"
+          {filteredMedia.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-96 bg-neutral-900/40 border border-neutral-800 rounded-2xl text-center p-8 space-y-4">
+              <FolderOpen className="w-12 h-12 text-neutral-600" />
+              <div className="space-y-1">
+                <p className="font-semibold text-neutral-300">
+                  {activeTab === 'trash' ? 'Recycle bin is empty' : 'No media items in library'}
+                </p>
+                <p className="text-xs text-neutral-500 max-w-sm">
+                  {activeTab === 'trash'
+                    ? 'Soft-deleted media items will show up here until purged.'
+                    : 'Click "Scan Local Folder" to index your media files.'}
+                </p>
+              </div>
+              {activeTab !== 'trash' && (
+                <button 
+                  onClick={handleSelectFolder}
+                  className="bg-[#E50914] hover:bg-red-700 text-white text-xs font-bold px-5 py-2.5 rounded-lg transition shadow-lg shadow-red-900/30"
                 >
-                  <div className="h-44 w-full overflow-hidden">
-                    <img 
-                      src={item.poster} 
-                      alt={item.title} 
-                      className="w-full h-full object-cover group-hover:scale-110 transition duration-500 opacity-90 group-hover:opacity-100"
-                    />
-                  </div>
-                  <div className="p-4">
-                    <span className="text-[10px] font-bold text-red-500 uppercase">{item.category}</span>
-                    <h3 className="font-bold text-base text-white truncate">{item.title}</h3>
-                    <p className="text-xs text-neutral-400 mt-1 line-clamp-1">{item.desc}</p>
-                  </div>
-                </div>
-              ))}
+                  Choose Folder to Scan
+                </button>
+              )}
             </div>
-          </div>
+          ) : (
+            <div className="grid grid-cols-4 gap-6">
+              {filteredMedia.map((item) => {
+                const history = watchHistory[item.path];
+                const progressPct = history && history.duration > 0 
+                  ? Math.min(100, Math.max(0, (history.progress / history.duration) * 100)) 
+                  : 0;
+
+                return (
+                  <div 
+                    key={item.id}
+                    onClick={() => {
+                      if (item.media_type === 'video' && item.is_deleted !== 1) {
+                        setCurrentPlayingMedia(item);
+                      }
+                    }}
+                    className="group relative bg-neutral-900 rounded-xl overflow-hidden border border-neutral-800 hover:border-red-600 transition duration-300 cursor-pointer shadow-lg hover:scale-[1.02]"
+                  >
+                    <div className="h-40 w-full bg-neutral-950 flex items-center justify-center border-b border-neutral-800 relative">
+                      <Film className="w-10 h-10 text-neutral-700 group-hover:text-red-500 transition" />
+                      
+                      {item.media_type === 'video' && item.is_deleted !== 1 && (
+                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition">
+                          <div className="p-3 bg-[#E50914] rounded-full text-white shadow-lg">
+                            <Play className="w-5 h-5 fill-white" />
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Action buttons (Delete / Restore) */}
+                      <div className="absolute top-2 left-2 opacity-0 group-hover:opacity-100 transition flex gap-1 z-10">
+                        {activeTab === 'trash' ? (
+                          <>
+                            <button
+                              onClick={(e) => handleRestore(e, item.id)}
+                              className="p-1.5 bg-neutral-900/90 hover:bg-emerald-600 text-white rounded-lg transition border border-neutral-700"
+                              title="Restore to Library"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={(e) => handlePermanentDelete(e, item.id)}
+                              className="p-1.5 bg-neutral-900/90 hover:bg-red-700 text-white rounded-lg transition border border-neutral-700"
+                              title="Delete Permanently"
+                            >
+                              <Trash className="w-3.5 h-3.5" />
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            onClick={(e) => handleSoftDelete(e, item.id)}
+                            className="p-1.5 bg-neutral-900/90 hover:bg-red-600 text-white rounded-lg transition border border-neutral-700"
+                            title="Move to Recycle Bin"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+
+                      <span className="absolute top-2 right-2 text-[10px] font-mono bg-black/70 px-2 py-0.5 rounded text-neutral-300">
+                        {item.size ? (item.size / (1024 * 1024)).toFixed(1) + ' MB' : ''}
+                      </span>
+
+                      {/* Watch Progress Bar */}
+                      {item.media_type === 'video' && progressPct > 0 && item.is_deleted !== 1 && (
+                        <div className="absolute bottom-0 left-0 right-0 h-1 bg-neutral-800">
+                          <div 
+                            className="h-full bg-[#E50914]" 
+                            style={{ width: `${progressPct}%` }}
+                          />
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="p-4 space-y-1">
+                      <span className="text-[10px] font-bold text-red-500 uppercase tracking-wider">{item.category}</span>
+                      <h3 className="font-bold text-base text-white truncate" title={item.title}>{item.title}</h3>
+                      <p className="text-[11px] text-neutral-500 truncate font-mono">{item.path}</p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </main>
+
+      {/* VIDEO PLAYER MODAL OVERLAY */}
+      {currentPlayingMedia && (
+        <VideoPlayer 
+          media={currentPlayingMedia} 
+          onClose={() => {
+            setCurrentPlayingMedia(null);
+            loadAppData();
+          }} 
+        />
+      )}
+
+      {/* SETTINGS MODAL */}
+      {isSettingsOpen && (
+        <SettingsModal 
+          onClose={() => setIsSettingsOpen(false)} 
+          onRefreshLibrary={handleSelectFolder} 
+        />
+      )}
     </div>
   );
 }

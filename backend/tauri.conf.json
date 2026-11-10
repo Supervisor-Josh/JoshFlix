@@ -1,7 +1,7 @@
 {
   "productName": "JoshFlix",
   "version": "0.1.0",
-  "identifier": "com.joshflix.app",
+  "identifier": "com.joshflix.desktop",
   "build": {
     "beforeDevCommand": "npm run dev --prefix frontend",
     "beforeBuildCommand": "npm run build --prefix frontend",
@@ -22,7 +22,12 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
-    "icon": []
+    "targets": ["deb", "rpm", "appimage"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ]
   }
 }
