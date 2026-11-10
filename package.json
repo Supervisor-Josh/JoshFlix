@@ -1,0 +1,12 @@
+{
+  "name": "joshflix-root",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=frontend",
+    "tauri:dev": "npx @tauri-apps/cli dev --config backend/tauri.conf.json"
+  }
+}
